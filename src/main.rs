@@ -111,6 +111,12 @@ fn print_packet(packet: &Packet, args: &Args) {
                         sport = Some(udp.source_port());
                         dport = Some(udp.destination_port());
                     }
+                    etherparse::TransportSlice::Icmpv4(_) => {
+                        tproto = "ICMPv4".into();
+                    }
+                    etherparse::TransportSlice::Icmpv6(_) => {
+                        tproto = "ICMPv6".into();
+                    }
                 }
             }
 
