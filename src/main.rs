@@ -1,9 +1,8 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use etherparse::PacketHeaders;
-use pcap::{Active, Capture, Device, Packet};
+use etherparse::SlicedPacket;
+use pcap::{Capture, Device, Packet};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Simple network packet sniffer (mini-Wireshark)
 #[derive(Parser, Debug)]
@@ -40,37 +39,15 @@ fn ts_to_secs(ts_sec: i64, ts_usec: i64) -> f64 {
 
 fn packet_summary(packet: &Packet) -> String {
     let ts = packet.header.ts;
-    format!("len={} ts={}", packet.header.len, ts_to_secs(ts.tv_sec, ts.tv_usec))
+    format!("len={} ts={}", packet.header.len, ts_to_secs(ts.tv_sec, ts.tv_usec.into()))
 }
 
 fn print_packet(packet: &Packet, args: &Args) {
-    match PacketHeaders::from_ethernet_slice(packet.data) {
-        Ok(headers) => {
+    match SlicedPacket::from_ethernet(packet.data) {
+        Ok(sliced) => {
             let mut line = packet_summary(packet);
-            if let Some(link) = headers.link {
-                line.push_str(&format!(" eth: {:?}", link));
-            }
-            if let Some(ip) = headers.ip {
-                match ip {
-                    etherparse::InternetHeader::Version4(hdr, _options) => {
-                        line.push_str(&format!(" ipv4 {} -> {}", hdr.source, hdr.destination));
-                    }
-                    etherparse::InternetHeader::Version6(hdr, _ext) => {
-                        line.push_str(&format!(" ipv6 {} -> {}", hdr.source, hdr.destination));
-                    }
-                }
-            }
-            if let Some(transport) = headers.transport {
-                match transport {
-                    etherparse::TransportHeader::Tcp(tcp) => {
-                        line.push_str(&format!(" tcp {} -> {}", tcp.source_port, tcp.destination_port));
-                    }
-                    etherparse::TransportHeader::Udp(udp) => {
-                        line.push_str(&format!(" udp {} -> {}", udp.source_port, udp.destination_port));
-                    }
-                    _ => {}
-                }
-            }
+            line.push_str(&format!(" net={:?}", sliced.net));
+            line.push_str(&format!(" transport={:?}", sliced.transport));
             println!("{}", line);
 
             if args.hex {
@@ -139,7 +116,7 @@ fn main() -> Result<()> {
 
     let mut seen: u64 = 0;
     loop {
-        let packet = match cap.next() {
+        let packet = match cap.next_packet() {
             Ok(pkt) => pkt,
             Err(pcap::Error::NoMorePackets) => {
                 // In live capture this should not happen; continue
@@ -152,9 +129,10 @@ fn main() -> Result<()> {
         };
 
         if let Some(ref mut w) = writer {
-            // write copy to pcap savefile
-            if let Err(e) = w.write(&packet) {
-                eprintln!("Failed to write packet to savefile: {}", e);
+            // write copy to pcap savefile (Savefile::write takes a slice)
+            w.write(&packet);
+            if let Err(e) = w.flush() {
+                eprintln!("Failed to flush savefile: {}", e);
             }
         }
 
