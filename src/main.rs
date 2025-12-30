@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use colored::Colorize;
 use etherparse::SlicedPacket;
 use pcap::{Capture, Device, Packet};
 use std::path::PathBuf;
@@ -24,6 +25,10 @@ struct Args {
     #[arg(short, long)]
     json: bool,
 
+    /// Pretty / colored structured output
+    #[arg(long)]
+    pretty: bool,
+
     /// Print hex dump of packet payloads
     #[arg(short, long)]
     hex: bool,
@@ -31,6 +36,10 @@ struct Args {
     /// Save captured packets to a pcap file
     #[arg(short = 'w', long)]
     write: Option<PathBuf>,
+
+    /// Filter to a protocol (tcp|udp|icmp)
+    #[arg(long)]
+    protocol: Option<String>,
 }
 
 fn ts_to_secs(ts_sec: i64, ts_usec: i64) -> f64 {
@@ -42,9 +51,91 @@ fn packet_summary(packet: &Packet) -> String {
     format!("len={} ts={}", packet.header.len, ts_to_secs(ts.tv_sec, ts.tv_usec.into()))
 }
 
+fn json_from_packet(packet: &Packet) -> serde_json::Value {
+    match SlicedPacket::from_ethernet(packet.data) {
+        Ok(sliced) => {
+            let ts = packet.header.ts;
+            let tsf = ts_to_secs(ts.tv_sec.into(), ts.tv_usec.into());
+
+            let mut net_proto = serde_json::Value::String("-".into());
+            let mut src = serde_json::Value::String("-".into());
+            let mut dst = serde_json::Value::String("-".into());
+            if let Some(net) = &sliced.net {
+                match net {
+                    etherparse::InternetSlice::Ipv4(ipv4) => {
+                        net_proto = serde_json::Value::String("IPv4".into());
+                        let hdr = ipv4.header();
+                        src = serde_json::Value::String(hdr.source_addr().to_string());
+                        dst = serde_json::Value::String(hdr.destination_addr().to_string());
+                    }
+                    etherparse::InternetSlice::Ipv6(ipv6) => {
+                        net_proto = serde_json::Value::String("IPv6".into());
+                        let hdr = ipv6.header();
+                        src = serde_json::Value::String(hdr.source_addr().to_string());
+                        dst = serde_json::Value::String(hdr.destination_addr().to_string());
+                    }
+                    _ => {}
+                }
+            }
+
+            let mut tproto = serde_json::Value::String("-".into());
+            let mut sport = serde_json::Value::Null;
+            let mut dport = serde_json::Value::Null;
+            if let Some(transport) = &sliced.transport {
+                match transport {
+                    etherparse::TransportSlice::Tcp(tcp) => {
+                        tproto = serde_json::Value::String("TCP".into());
+                        sport = serde_json::Value::Number(tcp.source_port().into());
+                        dport = serde_json::Value::Number(tcp.destination_port().into());
+                    }
+                    etherparse::TransportSlice::Udp(udp) => {
+                        tproto = serde_json::Value::String("UDP".into());
+                        sport = serde_json::Value::Number(udp.source_port().into());
+                        dport = serde_json::Value::Number(udp.destination_port().into());
+                    }
+                    _ => {}
+                }
+            }
+
+            serde_json::json!({
+                "timestamp": tsf,
+                "summary": packet_summary(&packet),
+                "len": packet.header.len,
+                "data_len": packet.data.len(),
+                "net_proto": net_proto,
+                "src": src,
+                "dst": dst,
+                "transport_proto": tproto,
+                "sport": sport,
+                "dport": dport,
+            })
+        }
+        Err(_) => serde_json::json!({
+            "summary": packet_summary(&packet),
+            "len": packet.header.len,
+            "data_len": packet.data.len(),
+        }),
+    }
+}
+
+
 fn print_packet(packet: &Packet, args: &Args) {
     match SlicedPacket::from_ethernet(packet.data) {
         Ok(sliced) => {
+            // protocol filter
+            if let Some(proto) = &args.protocol {
+                let proto_l = proto.to_ascii_lowercase();
+                let mut keep = false;
+                match &sliced.transport {
+                    Some(etherparse::TransportSlice::Tcp(_)) if proto_l == "tcp" => keep = true,
+                    Some(etherparse::TransportSlice::Udp(_)) if proto_l == "udp" => keep = true,
+                    _ => {}
+                }
+                if !keep {
+                    return;
+                }
+            }
+
             let ts = packet.header.ts;
             let tsf = ts_to_secs(ts.tv_sec.into(), ts.tv_usec.into());
 
@@ -90,14 +181,26 @@ fn print_packet(packet: &Packet, args: &Args) {
                 }
             }
 
-            let sport_str = sport.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string());
-            let dport_str = dport.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string());
+            // Pretty output
+            if args.pretty {
+                use colored::Colorize;
+                let src_pr = src.as_str().green();
+                let dst_pr = dst.as_str().red();
+                let proto_pr = tproto.as_str().yellow();
+                println!(
+                    "{:.6} {} {} -> {} {}",
+                    tsf, packet.header.len.to_string().cyan(), src_pr, dst_pr, proto_pr
+                );
+            } else {
+                let sport_str = sport.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string());
+                let dport_str = dport.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string());
 
-            let line = format!(
-                "{:.6} len={} {} {}:{} -> {}:{} {}",
-                tsf, packet.header.len, net_proto, src, sport_str, dst, dport_str, tproto
-            );
-            println!("{}", line);
+                let line = format!(
+                    "{:.6} len={} {} {}:{} -> {}:{} {}",
+                    tsf, packet.header.len, net_proto, src, sport_str, dst, dport_str, tproto
+                );
+                println!("{}", line);
+            }
 
             if args.hex {
                 // Print hex dump of the packet data
@@ -187,74 +290,24 @@ fn main() -> Result<()> {
 
         if args.json {
             // JSON output with parsed fields when possible
-            match SlicedPacket::from_ethernet(packet.data) {
-                Ok(sliced) => {
-                    let ts = packet.header.ts;
-                    let tsf = ts_to_secs(ts.tv_sec.into(), ts.tv_usec.into());
-
-                    let mut net_proto = serde_json::Value::String("-".into());
-                    let mut src = serde_json::Value::String("-".into());
-                    let mut dst = serde_json::Value::String("-".into());
-                    if let Some(net) = &sliced.net {
-                        match net {
-                            etherparse::InternetSlice::Ipv4(ipv4) => {
-                                net_proto = serde_json::Value::String("IPv4".into());
-                                let hdr = ipv4.header();
-                                src = serde_json::Value::String(hdr.source_addr().to_string());
-                                dst = serde_json::Value::String(hdr.destination_addr().to_string());
-                            }
-                            etherparse::InternetSlice::Ipv6(ipv6) => {
-                                net_proto = serde_json::Value::String("IPv6".into());
-                                let hdr = ipv6.header();
-                                src = serde_json::Value::String(hdr.source_addr().to_string());
-                                dst = serde_json::Value::String(hdr.destination_addr().to_string());
-                            }
-                            _ => {}
-                        }
+            // Apply protocol filter when requested
+            if let Some(proto) = &args.protocol {
+                if let Ok(sliced) = SlicedPacket::from_ethernet(packet.data) {
+                    let proto_l = proto.to_ascii_lowercase();
+                    let matches = match sliced.transport {
+                        Some(etherparse::TransportSlice::Tcp(_)) => proto_l == "tcp",
+                        Some(etherparse::TransportSlice::Udp(_)) => proto_l == "udp",
+                        _ => false,
+                    };
+                    if !matches {
+                        continue;
                     }
-
-                    let mut tproto = serde_json::Value::String("-".into());
-                    let mut sport = serde_json::Value::Null;
-                    let mut dport = serde_json::Value::Null;
-                    if let Some(transport) = &sliced.transport {
-                        match transport {
-                            etherparse::TransportSlice::Tcp(tcp) => {
-                                tproto = serde_json::Value::String("TCP".into());
-                                sport = serde_json::Value::Number(tcp.source_port().into());
-                                dport = serde_json::Value::Number(tcp.destination_port().into());
-                            }
-                            etherparse::TransportSlice::Udp(udp) => {
-                                tproto = serde_json::Value::String("UDP".into());
-                                sport = serde_json::Value::Number(udp.source_port().into());
-                                dport = serde_json::Value::Number(udp.destination_port().into());
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    let output = serde_json::json!({
-                        "timestamp": tsf,
-                        "summary": packet_summary(&packet),
-                        "len": packet.header.len,
-                        "data_len": packet.data.len(),
-                        "net_proto": net_proto,
-                        "src": src,
-                        "dst": dst,
-                        "transport_proto": tproto,
-                        "sport": sport,
-                        "dport": dport,
-                    });
-                    println!("{}", serde_json::to_string(&output)?);
-                }
-                Err(_) => {
-                    let output = serde_json::json!({
-                        "summary": packet_summary(&packet),
-                        "len": packet.header.len,
-                        "data_len": packet.data.len(),
-                    });
-                    println!("{}", serde_json::to_string(&output)?);
                 }
             }
+
+            let ts = packet.header.ts;
+            let output = network_packet_sniffer::json_from_bytes(packet.header.len, ts.tv_sec.into(), ts.tv_usec.into(), packet.data);
+            println!("{}", serde_json::to_string(&output)?);
         } else {
             print_packet(&packet, &args);
         }
