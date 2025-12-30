@@ -23,7 +23,6 @@ pub fn json_from_bytes(len: u32, ts_sec: i64, ts_usec: i64, data: &[u8]) -> serd
                         src = serde_json::Value::String(hdr.source_addr().to_string());
                         dst = serde_json::Value::String(hdr.destination_addr().to_string());
                     }
-                    _ => {}
                 }
             }
 

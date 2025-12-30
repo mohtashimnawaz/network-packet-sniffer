@@ -8,6 +8,7 @@ Simple CLI network packet sniffer written in Rust using `pcap` + `etherparse`.
 - BPF filter support (`-f`)
 - JSON output per-packet (`--json`)
 - Optional colored/pretty output (`--pretty`)
+- Control pretty output fields with `--pretty-format` (comma-separated list of fields: `ts,len,src,dst,sport,dport,proto`)
 - Save captured packets to pcap (`-w out.pcap`)
 - Protocol filtering (`--protocol tcp|udp|icmp`)
 
@@ -23,7 +24,7 @@ Run (may require elevated privileges):
 
 ```bash
 # capture on en0, print pretty output
-sudo ./target/release/network-packet-sniffer --interface en0 --pretty
+sudo ./target/release/network-packet-sniffer --interface en0 --pretty --pretty-format ts,src,dst,proto
 
 # capture 100 packets on en0 and save to file
 sudo ./target/release/network-packet-sniffer -i en0 -c 100 -w out.pcap
