@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use colored::Colorize;
 use etherparse::SlicedPacket;
 use pcap::{Capture, Device, Packet};
 use std::path::PathBuf;
